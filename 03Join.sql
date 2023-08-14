@@ -39,4 +39,58 @@ WHERE
 	AND t2.ORD_DT < TO_DATE('20170201', 'YYYYMMDD');
 	
 
--- 데이터 집합과 데이터 집합의 연
+-- 데이터 집합과 데이터 집합의 연결 (where 절의 Filter 조건을 거친 결과끼리 연결)
+-- 여러 테이블을 조인하더라도, 조인하는 순간에는 두 개씩 이루어진다.
+
+-- 잘못 작성한 조인(M:1:M 조인)
+-- 고객:아이템평가 1:M, 고객:주문 1:M 인 상황에서 세 개의 테이블을 조인
+-- 특정 조건의 17년 3월의 아이템평가 기록과 3월 주문에 대해, 고객ID, 고객명별 아이템평가 건수, 주문건수 출력
+SELECT 
+	t1.CUS_ID 
+	, t1.CUS_NM 
+	, count(t2.ITM_ID) EVAL_CNT
+	, count(t3.ORD_SEQ) ORD_CNT
+FROM M_CUS t1, T_ITM_EVL t2, T_ORD t3
+WHERE 
+	t1.CUS_ID = t2.CUS_ID 
+	AND t1.CUS_ID = t3.CUS_ID 
+	AND t2.EVL_DT >= TO_DATE('20170301', 'YYYYMMDD')
+	AND t2.EVL_DT < TO_DATE('20170401', 'YYYYMMDD')
+	AND t3.ORD_DT >= TO_DATE('20170301', 'YYYYMMDD')
+	AND t3.ORD_DT < TO_DATE('20170401', 'YYYYMMDD')
+GROUP BY t1.CUS_ID, t1.CUS_NM;
+
+-- UNION ALL 을 사용하는 방법
+SELECT
+	t4.CUS_ID
+	, MAX(t4.CUS_NM)
+	, SUM(t4.EVAL_CNT)
+	, SUM(t4.CUS_NM)
+FROM (
+	SELECT 
+		t1.CUS_ID CUS_ID
+		, t1.CUS_NM CUS_NM
+		, count(t2.ITM_ID) EVAL_CNT
+		, NULL ORD_CNT
+	FROM M_CUS t1, T_ITM_EVL t2
+	WHERE 
+		t1.CUS_ID  = t2.CUS_ID 
+		AND t2.EVL_DT >= TO_DATE('20170301', 'YYYYMMDD')
+		AND t2.EVL_DT < TO_DATE('20170401', 'YYYYMMDD')
+	GROUP BY t1.CUS_ID, t1.CUS_NM
+	UNION ALL
+	SELECT 
+		t1.CUS_ID CUS_ID
+		, t1.CUS_NM CUS_NM
+		, NULL EVAL_CNT
+		, count(t3.ORD_SEQ) ORD_CNT
+	FROM M_CUS t1, T_ORD t3
+	WHERE 
+		t1.CUS_ID  = t3.CUS_ID 
+		AND t3.ORD_DT >= TO_DATE('20170301', 'YYYYMMDD')
+		AND t3.ORD_DT < TO_DATE('20170401', 'YYYYMMDD')
+	GROUP BY t1.CUS_ID, t1.CUS_NM
+) t4
+GROUP BY t4.CUS_ID;
+-- M:1 을 먼저 1로 만든 후 나머지 조인을 하는 방법
+-- 모두 1로 만든 후 1:1:1 조인을 하는 방법 
