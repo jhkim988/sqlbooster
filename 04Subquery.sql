@@ -416,4 +416,202 @@ CREATE TABLE S_CUS_YM (
  	t2.BAS_CD_DV = 'ITM_TP'
  	AND t2.LNG_CD = 'KO';
  COMMIT;
- 
+
+-- 기본 Update, 서브쿼리를 두 번 사용하여 성능상 좋지 못하다.
+UPDATE S_CUS_YM t1
+SET
+	t1.ORD_QTY = (
+		SELECT
+			SUM(B.ORD_QTY)
+		FROM
+			T_ORD A
+			, T_ORD_DET B
+			, M_ITM C
+		WHERE
+			A.ORD_SEQ = B.ORD_SEQ
+			AND B.ITM_ID = C.ITM_ID
+			AND C.ITM_TP = t1.ITM_TP
+			AND A.ORD_DT >= TO_DATE(t1.BAS_YM || '01', 'YYYYMMDD')
+			AND A.ORD_DT < ADD_MONTHS(TO_DATE(t1.BAS_YM || '01', 'YYYYMMDD'), 1)
+	)
+	, t1.ORD_AMT = (
+		SELECT
+			SUM(B.ORD_QTY * B.UNT_PRC)
+		FROM
+			T_ORD A
+			, T_ORD_DET B
+			, M_ITM C
+		WHERE 
+			A.ORD_SEQ = B.ORD_SEQ
+			AND B.ITM_ID = C.ITM_ID
+			AND C.ITM_TP = t1.ITM_TP
+			AND A.ORD_DT >= TO_DATE(t1.BAS_YM || '01', 'YYYYMMDD')
+			AND A.ORD_DT < ADD_MONTHS(TO_DATE(t1.BAS_YM || '01', 'YYYYMMDD'), 1)
+	)
+WHERE t1.BAS_YM = '201702';
+
+-- Merge 를 사용하여 서브쿼리 1회 사용하여 개선
+-- 주문 실적이 발생한 데이터만 변경한다. 없는 데이터를 NULL 이 아니라 0으로 처리해야한다면 수정해야 한다.
+MERGE INTO S_CUS_YM t1
+USING (
+	SELECT
+		A.CUS_ID 
+		, C.ITM_TP 
+		, SUM(B.ORD_QTY) ORD_QTY
+		, SUM(B.ORD_QTY * B.UNT_PRC) ORD_AMT
+	FROM
+		T_ORD A
+		, T_ORD_DET B
+		, M_ITM C
+	WHERE 
+		A.ORD_SEQ = B.ORD_SEQ
+		AND B.ITM_ID = C.ITM_ID
+		AND A.ORD_DT >= TO_DATE('201702' || '01', 'YYYYMMDD')
+		AND A.ORD_DT < ADD_MONTHS(TO_DATE('201702' || '01', 'YYYYMMDD'), 1)
+	GROUP BY A.CUS_ID, C.ITM_TP
+) t2
+ON (
+	t1.BAS_YM = '201702'
+	AND t1.CUS_ID = t2.CUS_ID
+	AND t1.ITM_TP = t2.ITM_TP
+)
+WHEN MATCHED THEN UPDATE SET t1.ORD_QTY = t2.ORD_QTY, t1.ORD_AMT = t2.ORD_AMT;
+COMMIT;
+
+-- WITH: 인라인뷰와 비슷하지만, SQL 가장 윗부분에서 사용한다. 같은 SQL내에서 테이블처럼 사용할 수 있다.
+-- 반복되는 인라인 뷰를 제거하여 성능개선을 하거나 가독성을 좋게 할 수 있다. 성능은 실행계획을 확인해야 정확히 알 수 있고, 무분별하게 사용하여 성능이 나빠질 수도 있다.
+-- With 절마다 같은 테이블을 반복사용하는 것을 주의해야한다.
+-- 고객, 아이템유형별 주문금액 구하기: 인라인뷰
+SELECT
+	t0.CUS_ID
+	, t1.CUS_NM
+	, t0.ITM_TP
+	, (SELECT A.BAS_CD_NM FROM C_BAS_CD A WHERE A.LNG_CD='KO' AND A.BAS_CD_DV='ITM_TP' AND A.BAS_CD = t0.ITM_TP) ITM_TP_NM
+	, t0.ORD_AMT
+FROM (
+	SELECT 
+		A.CUS_ID
+		, C.ITM_TP 
+		, SUM(B.UNT_PRC * B.ORD_QTY) ORD_AMT
+	FROM
+		T_ORD A
+		, T_ORD_DET B
+		, M_ITM C
+	WHERE
+		A.ORD_SEQ  = B.ORD_SEQ 
+		AND B.ITM_ID = C.ITM_ID
+	GROUP BY A.CUS_ID, C.ITM_TP
+	) t0
+	, M_CUS t1
+WHERE t0.CUS_ID = t1.CUS_ID
+ORDER BY t0.CUS_ID, t0.ITM_TP;
+
+-- 고객, 아이템유형별 주문금액 구하기: with 절 이용
+WITH T_CUS_ITM_AMT AS (
+	SELECT 
+		A.CUS_ID
+		, C.ITM_TP 
+		, SUM(B.UNT_PRC * B.ORD_QTY) ORD_AMT
+	FROM
+		T_ORD A
+		, T_ORD_DET B
+		, M_ITM C
+	WHERE
+		A.ORD_SEQ  = B.ORD_SEQ 
+		AND B.ITM_ID = C.ITM_ID
+	GROUP BY A.CUS_ID, C.ITM_TP
+)
+SELECT
+	t0.CUS_ID
+	, t1.CUS_NM
+	, t0.ITM_TP
+	, (SELECT A.BAS_CD_NM FROM C_BAS_CD A WHERE A.LNG_CD='KO' AND A.BAS_CD_DV='ITM_TP' AND A.BAS_CD = t0.ITM_TP) ITM_TP_NM
+	, t0.ORD_AMT
+FROM
+	T_CUS_ITM_AMT t0
+	, M_CUS t1
+WHERE t0.CUS_ID = t1.CUS_ID 
+ORDER BY t0.CUS_ID, t0.ITM_TP;
+
+-- 고객, 아이템 유형별 주문금액, 전체주문 대비 주문금액비율
+WITH T_CUS_ITM_AMT AS (
+	SELECT 
+		A.CUS_ID
+		, C.ITM_TP 
+		, SUM(B.UNT_PRC * B.ORD_QTY) ORD_AMT
+	FROM
+		T_ORD A
+		, T_ORD_DET B
+		, M_ITM C
+	WHERE
+		A.ORD_SEQ  = B.ORD_SEQ 
+		AND B.ITM_ID = C.ITM_ID
+		AND A.ORD_DT >= TO_DATE('20170201', 'YYYYMMDD')
+		AND A.ORD_DT < TO_DATE('20170301', 'YYYYMMDD')
+	GROUP BY A.CUS_ID, C.ITM_TP
+), T_TTL_AMT AS (
+	SELECT 
+		SUM(A.ORD_AMT) ORD_AMT 
+	FROM T_CUS_ITM_AMT A
+)
+SELECT
+	t0.CUS_ID
+	, t1.CUS_NM
+	, t0.ITM_TP
+	, (SELECT A.BAS_CD_NM FROM C_BAS_CD A WHERE A.LNG_CD='KO' AND A.BAS_CD_DV='ITM_TP' AND A.BAS_CD = t0.ITM_TP) ITM_TP_NM
+	, t0.ORD_AMT
+	, ROUND(t0.ORD_AMT / t2.ORD_AMT * 100, 2) ORD_AMT_RT
+FROM
+	T_CUS_ITM_AMT t0
+	, M_CUS t1
+	, T_TTL_AMT t2
+WHERE t0.CUS_ID = t1.CUS_ID 
+ORDER BY t0.CUS_ID, t0.ITM_TP;
+
+-- with 를 이용한 insert
+-- 테스트용 S_CUS_YM 테이블에 ORD_AMT_RT 컬럼 추가
+ALTER TABLE S_CUS_YM ADD ORD_AMT_RT number(18, 3);
+
+INSERT INTO S_CUS_YM
+	(
+		BAS_YM
+		, CUS_ID
+		, ITM_TP
+		, ORD_QTY
+		, ORD_AMT
+		, ORD_AMT_RT
+	)
+WITH T_CUS_ITM_AMT AS (
+	SELECT 
+		TO_CHAR(A.ORD_DT, 'YYYYMM') BAS_YM
+		, A.CUS_ID
+		, C.ITM_TP 
+		, SUM(B.ORD_QTY) ORD_QTY
+		, SUM(B.UNT_PRC * B.ORD_QTY) ORD_AMT
+	FROM
+		T_ORD A
+		, T_ORD_DET B
+		, M_ITM C
+	WHERE
+		A.ORD_SEQ  = B.ORD_SEQ 
+		AND B.ITM_ID = C.ITM_ID
+		AND A.ORD_DT >= TO_DATE('20170201', 'YYYYMMDD')
+		AND A.ORD_DT < TO_DATE('20170301', 'YYYYMMDD')
+	GROUP BY TO_CHAR(A.ORD_DT, 'YYYYMM'), A.CUS_ID, C.ITM_TP
+), T_TTL_AMT AS (
+	SELECT 
+		SUM(A.ORD_AMT) ORD_AMT
+	FROM T_CUS_ITM_AMT A
+)
+SELECT
+	t0.BAS_YM
+	, t0.CUS_ID
+	, t0.ITM_TP
+	, t0.ORD_QTY
+	, t0.ORD_AMT
+	, ROUND(t0.ORD_AMT / t2.ORD_AMT * 100, 2) ORD_AMT_RT
+FROM
+	T_CUS_ITM_AMT t0
+	, M_CUS t1
+	, T_TTL_AMT t2
+WHERE t0.CUS_ID = t1.CUS_ID
