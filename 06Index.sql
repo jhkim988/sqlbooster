@@ -25,7 +25,7 @@ ORDER BY t.LAST_ACTIVE_TIME DESC;
 
 SELECT 
 	*
-FROM TABLE(dbms_xplan.display_cursor('a55nc8pxr9aar', 0, 'ALLSTATS LAST'));
+FROM TABLE(dbms_xplan.display_cursor('af50htyz56b3b', 0, 'ALLSTATS LAST'));
 ----------------------------------------------------------------------------------------------------
 
 -- 인덱스 없이 실행, Buffer 258K, Reads 258K
@@ -229,3 +229,94 @@ WHERE EXISTS (
 	WHERE t.CUS_ID = 'CUS_0042'
 );
 
+-- 많은 조건이 걸리는 SQL
+SELECT
+	/*+ GATHER_PLAN_STATISTICS INDEX(t X_T_ORD_BIG_3) */
+	count(*)
+FROM T_ORD_BIG t
+WHERE
+	t.ORD_AMT = 2400
+	AND t.PAY_TP = 'CARD'
+	AND t.ORD_YMD = '20170406'
+	AND t.ORD_ST = 'COMP'
+	AND t.CUS_ID = 'CUS_0036';
+-- 성능에 도움이 되는 컬럼을 선정하여 인덱스를 구성한다.
+SELECT 'ORD_AMT' COL, count(*) CNT FROM T_ORD_BIG t WHERE t.ORD_AMT = 2400 UNION ALL
+SELECT 'PAY_TP' COL, count(*) CNT FROM T_ORD_BIG t WHERE t.PAY_TP = 'CARD' UNION ALL 
+SELECT 'ORD_YMD' COL, count(*) CNT FROM T_ORD_BIG t WHERE t.ORD_YMD = '20170406' UNION ALL 
+SELECT 'ORD_ST' COL, count(*) CNT FROM T_ORD_BIG t WHERE t.ORD_ST = 'COMP' UNION ALL 
+SELECT 'CUS_ID' COL, count(*) CNT FROM T_ORD_BIG t WHERE t.CUS_ID = 'CUS_0036' 
+-- ORD_YMD 와 CUS_ID 로 인덱스를 구성하면 충분히 성능이 나올 것이다.
+-- 실행계획에서 A-ROWS 의 값이, Index range scan 과 table access 에서 같다. 인덱스를 더 추가할 필요가 없다.
+
+-- Covering Index
+-- 테이블 접근 횟수를 줄이는 것이 중요한데, 아예 접근 자체를 생략할 수 있다면 더 좋다.
+-- 테이블 접근 3만 회, 인덱스에 ORD_ST 컬럼이 없기 때문에 테이블에 접근하여 값을 확인한다.
+SELECT 
+	/*+ GATHER_PLAN_STATISTICS INDEX(t X_T_ORD_BIG_4) */
+	t.ORD_ST
+	, COUNT(*)
+FROM T_ORD_BIG t
+WHERE 
+	t.ORD_YMD LIKE '201703%'
+	AND t.CUS_ID = 'CUS_0075'
+GROUP BY t.ORD_ST;
+
+-- X_T_ORD_BIG_4 를 제거하고, ORD_ST 컬럼을 추가하여 다시 인덱스를 만들어본다. 
+DROP INDEX X_T_ORD_BIG_4;
+CREATE INDEX X_T_ORD_BIG_4 ON T_ORD_BIG(CUS_ID, ORD_YMD, ORD_ST);
+-- Buffers 가 줄어든 것을 확인할 수 있다.
+-- 그러나 모든 SQL 에 이처럼 생성하면 안된다. 데이터의 변경 성능이 나빠지고, 요구사항이 수시로 변경되면서 where 절에 새로운 column 이 추가되면 다시 테이블 접근이 생긴다.
+
+-- Predicate Information - Access
+-- CUS_0075 의 201703 주문을 조회하는 SQL
+SELECT 
+	/*+ GATHER_PLAN_STATISTICS */
+	t.ORD_ST
+	, count(*)
+FROM T_ORD_BIG t
+WHERE
+	SUBSTR(t.ORD_YMD, 1, 6) = '201703' 
+	AND t.CUS_ID = 'CUS_0075'
+GROUP BY t.ORD_ST;
+-- 실행계획의 Predicate Information 을 살펴보면, CUS_ID 조건은 access, SUBSTR() = '201703' 은 filter 로 처리하고 있다.
+-- access 는 인덱스 리프 블록의 스캔 시작위치를 찾 데 사용한 조건이고, filter 는 리프블록을 차례대로 스캔하면서 처리한 조건이다.
+-- 인덱스를 제대로 탔다면 ORD_YMD 조건도 access 에 표시돼야 한다. SUBSTR 로 ORD_YMD 컬럼을 변형해서 인덱스를 제대로 사용하지 못한 것이다.
+
+-- Like 조건을 사용한다
+-- access 에 ORD_YMD 조건이 추가된 것을 확인할 수 있다.
+SELECT 
+	/*+ GATHER_PLAN_STATISTICS */
+	t.ORD_ST
+	, count(*)
+FROM T_ORD_BIG t
+WHERE
+	t.ORD_YMD LIKE '201703%' 
+	AND t.CUS_ID = 'CUS_0075'
+GROUP BY t.ORD_ST;
+
+-- 앞쪽 % 도 access 를 CUS_ID 로만 하는 것을 확인할 수 있다.
+SELECT 
+	/*+ GATHER_PLAN_STATISTICS */
+	t.ORD_ST
+	, count(*)
+FROM T_ORD_BIG t
+WHERE
+	t.ORD_YMD LIKE '%03%' 
+	AND t.CUS_ID = 'CUS_0075'
+GROUP BY t.ORD_ST;
+
+-- 인덱스의 크기
+-- 인덱스 크기를 합치면 테이블보다 커진다. insert 할 때 모든 인덱스에 insert 된다.
+-- 인덱스를 신중히 만들어야 한다.
+SELECT 
+	t1.SEGMENT_NAME
+	, t1.SEGMENT_TYPE
+	, t1.BYTES / 1024 / 1024 AS SIZE_MB
+	, t1.BYTES / t2. CNT BYTE_PER_ROW
+FROM
+	DBA_SEGMENTS t1
+	, (SELECT count(*) CNT FROM ORA_SQL_TEST.T_ORD_BIG) t2
+WHERE 
+	t1.segment_name LIKE '%ORD_BIG%'
+ORDER BY t1.SEGMENT_NAME;
